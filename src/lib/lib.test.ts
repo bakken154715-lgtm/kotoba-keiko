@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseReview } from './coach';
 import { db, exportBackup, importBackup, saveEntry } from './db';
-import { GeminiError, generate, geminiAudioType, userText } from './gemini';
+import { GeminiError, generate, geminiAudioType, testConnection, userText } from './gemini';
 import { updateSettings } from './settings';
 import { dayIndex, streakDays } from './stats';
 import { totalScore } from './types';
@@ -121,6 +121,56 @@ describe('generate', () => {
     vi.stubGlobal('fetch', badKey);
     await expect(generate({ contents: [userText('質問')] })).rejects.toBeInstanceOf(GeminiError);
     expect(badKey).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a key with unusable characters without calling the network', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    updateSettings({ apiKey: 'APIキー' });
+    await expect(generate({ contents: [userText('質問')] })).rejects.toMatchObject({ kind: 'key-format' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('strips invisible characters from the key before sending', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => ok('答え'));
+    vi.stubGlobal('fetch', fetchMock);
+    updateSettings({ apiKey: ' test​-key\n' });
+    await generate({ contents: [userText('質問')] });
+    expect((fetchMock.mock.calls[0][1].headers as Record<string, string>)['x-goog-api-key']).toBe('test-key');
+  });
+
+  it('reports the raw cause of a network failure and does not retry it', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError('Load failed');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generate({ contents: [userText('質問')] })).rejects.toMatchObject({
+      kind: 'network',
+      message: expect.stringContaining('TypeError: Load failed'),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a timeout on the lighter model', async () => {
+    const fetchMock = vi.fn(async (url: string, _init: RequestInit) => {
+      if (url.includes('3.8')) throw new DOMException('Aborted', 'AbortError');
+      return ok('軽量の答え');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await generate({ contents: [userText('質問')] })).toBe('軽量の答え');
+  });
+
+  it('separates a blocked route from a bad key in the connection test', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw new TypeError('Load failed');
+    }));
+    await expect(testConnection()).rejects.toMatchObject({ kind: 'unreachable' });
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('API_KEY_INVALID', { status: 400 })));
+    await expect(testConnection()).rejects.toMatchObject({ kind: 'bad-key' });
+
+    vi.stubGlobal('fetch', vi.fn(async () => ok('はい')));
+    await expect(testConnection()).resolves.toBeUndefined();
   });
 
   it('asks for a key before calling the network', async () => {

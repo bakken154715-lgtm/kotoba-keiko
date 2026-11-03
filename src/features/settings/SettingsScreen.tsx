@@ -1,6 +1,7 @@
 import { useRef, useState, type ChangeEvent } from 'react';
 import { exportBackup, importBackup } from '../../lib/db';
-import { MODELS, getSettings, updateSettings } from '../../lib/settings';
+import { testConnection } from '../../lib/gemini';
+import { MODELS, cleanApiKey, getSettings, isApiKeyFormatValid, updateSettings } from '../../lib/settings';
 import { ErrorNote, errorMessage } from '../../ui';
 
 async function deliverBackup(json: string) {
@@ -28,7 +29,24 @@ export function SettingsScreen() {
   const [showKey, setShowKey] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState('');
+  const [testError, setTestError] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
+
+  async function onTest() {
+    setTesting(true);
+    setTestResult('');
+    setTestError('');
+    try {
+      await testConnection();
+      setTestResult('AIに接続できました。');
+    } catch (err) {
+      setTestError(errorMessage(err));
+    } finally {
+      setTesting(false);
+    }
+  }
 
   function change(patch: Parameters<typeof updateSettings>[0]) {
     setSettings(updateSettings(patch));
@@ -73,7 +91,7 @@ export function SettingsScreen() {
               autoComplete="off"
               spellCheck={false}
               value={settings.apiKey}
-              onChange={(event) => change({ apiKey: event.target.value.trim() })}
+              onChange={(event) => change({ apiKey: cleanApiKey(event.target.value) })}
             />
             <button type="button" className="button" onClick={() => setShowKey(!showKey)}>
               {showKey ? '隠す' : '表示'}
@@ -84,6 +102,14 @@ export function SettingsScreen() {
           キーは<a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio</a>
           で無料で作れます。この端末の中だけに保存します。
         </p>
+        {settings.apiKey && !isApiKeyFormatValid(settings.apiKey) && (
+          <ErrorNote message="キーに使えない文字が入っています。AI Studioのコピーボタンでコピーし直してください。" />
+        )}
+        <button className="button" disabled={testing} onClick={onTest}>
+          {testing ? '確かめています' : 'AIへの接続を確かめる'}
+        </button>
+        {testResult && <p className="note" role="status">{testResult}</p>}
+        {testError && <ErrorNote message={testError} />}
         <label className="field">
           使うモデル
           <select value={settings.model} onChange={(event) => change({ model: event.target.value })}>

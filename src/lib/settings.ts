@@ -13,6 +13,16 @@ export interface Settings {
 const KEY = 'kotoba-keiko-settings';
 const DEFAULTS: Settings = { apiKey: '', model: MODELS[0].id, sampleMode: false };
 
+/** コピー時に混ざりやすい空白や見えない文字を取り除く */
+export function cleanApiKey(value: string): string {
+  return value.replace(/[\s​-‍⁠﻿]/g, '');
+}
+
+/** 通信のヘッダーに入れられるのは半角文字だけ */
+export function isApiKeyFormatValid(key: string): boolean {
+  return /^[\x21-\x7e]+$/.test(key);
+}
+
 // プライベートブラウズなどで localStorage が使えない場合はメモリに持つ
 let memory: Settings | null = null;
 

@@ -1,23 +1,50 @@
-import { FALLBACK_MODEL, getSettings } from './settings';
+import { FALLBACK_MODEL, cleanApiKey, getSettings, isApiKeyFormatValid } from './settings';
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const TIMEOUT_MS = 90_000;
 
-export type GeminiErrorKind = 'no-key' | 'bad-key' | 'quota' | 'network' | 'blocked' | 'server';
+export type GeminiErrorKind =
+  | 'no-key'
+  | 'key-format'
+  | 'bad-key'
+  | 'quota'
+  | 'network'
+  | 'unreachable'
+  | 'timeout'
+  | 'blocked'
+  | 'server';
 
 const MESSAGES: Record<GeminiErrorKind, string> = {
   'no-key': 'APIキーが未設定です。設定画面で入力するか、見本の採点をオンにしてください。',
+  'key-format': 'APIキーに使えない文字が入っています。設定画面でキーをコピーし直してください。',
   'bad-key': 'APIキーが無効です。設定画面でキーを確認してください。',
   quota: '無料枠の上限に達しました。しばらく待つか、翌日にもう一度試してください。',
-  network: 'AIに接続できませんでした。通信状況を確認して、もう一度試してください。',
+  network: 'AIに接続できませんでした。設定画面の「AIへの接続を確かめる」で原因を確認してください。',
+  unreachable:
+    'Googleのサーバーに届きません。広告ブロック、VPN、プライベートリレーを使っていれば、オフにして試してください。',
+  timeout: 'AIの応答に時間がかかりすぎました。少し待って、もう一度試してください。',
   blocked: 'AIが応答を返しませんでした。内容を少し変えて、もう一度試してください。',
   server: 'AI側でエラーが起きました。少し待って、もう一度試してください。',
 };
 
 export class GeminiError extends Error {
-  constructor(public kind: GeminiErrorKind) {
-    super(MESSAGES[kind]);
+  constructor(
+    public kind: GeminiErrorKind,
+    detail?: string,
+  ) {
+    super(detail ? `${MESSAGES[kind]}(詳細: ${detail})` : MESSAGES[kind]);
   }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+function usableKey(): string {
+  const key = cleanApiKey(getSettings().apiKey);
+  if (!key) throw new GeminiError('no-key');
+  if (!isApiKeyFormatValid(key)) throw new GeminiError('key-format');
+  return key;
 }
 
 export type Part = { text: string } | { inlineData: { mimeType: string; data: string } };
@@ -50,8 +77,9 @@ async function requestModel(model: string, apiKey: string, options: GenerateOpti
       }),
       signal: controller.signal,
     });
-  } catch {
-    throw new GeminiError('network');
+  } catch (error) {
+    if ((error as Error).name === 'AbortError') throw new GeminiError('timeout');
+    throw new GeminiError('network', describeError(error));
   } finally {
     clearTimeout(timer);
   }
@@ -62,7 +90,7 @@ async function requestModel(model: string, apiKey: string, options: GenerateOpti
     if (response.status === 401 || response.status === 403 || body.includes('API_KEY_INVALID')) {
       throw new GeminiError('bad-key');
     }
-    throw new GeminiError('server');
+    throw new GeminiError('server', `${model} ${response.status} ${body.slice(0, 200)}`);
   }
 
   const data = await response.json();
@@ -77,15 +105,28 @@ async function requestModel(model: string, apiKey: string, options: GenerateOpti
 
 /** 上限やサーバーエラーのときは軽量モデルでもう一度試す */
 export async function generate(options: GenerateOptions): Promise<string> {
-  const { apiKey, model } = getSettings();
-  if (!apiKey) throw new GeminiError('no-key');
+  const { model } = getSettings();
+  const apiKey = usableKey();
   try {
     return await requestModel(model, apiKey, options);
   } catch (error) {
-    const retryable = error instanceof GeminiError && (error.kind === 'quota' || error.kind === 'server');
+    const retryable =
+      error instanceof GeminiError && (error.kind === 'quota' || error.kind === 'server' || error.kind === 'timeout');
     if (!retryable || model === FALLBACK_MODEL) throw error;
     return requestModel(FALLBACK_MODEL, apiKey, options);
   }
+}
+
+/** キーの形式、Googleまでの経路、実際の応答の順に確かめる。失敗した段階のエラーを投げる */
+export async function testConnection(): Promise<void> {
+  usableKey();
+  try {
+    // キーなしでも応答が返れば経路は通っている(403が正常)
+    await fetch(ENDPOINT);
+  } catch (error) {
+    throw new GeminiError('unreachable', describeError(error));
+  }
+  await generate({ contents: [userText('「はい」とだけ答えてください。')] });
 }
 
 export function userText(text: string): Content {

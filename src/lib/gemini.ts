@@ -1,7 +1,8 @@
 import { FALLBACK_MODEL, cleanApiKey, getSettings, isApiKeyFormatValid } from './settings';
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
-const TIMEOUT_MS = 90_000;
+// iPhoneのSafariは約60秒で通信を打ち切ることがあるので、その前に自分で区切って軽量モデルへ回す
+const TIMEOUT_MS = 50_000;
 
 export type GeminiErrorKind =
   | 'no-key'
@@ -63,6 +64,12 @@ interface GenerateOptions {
 async function requestModel(model: string, apiKey: string, options: GenerateOptions): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const startedAt = Date.now();
+  // 軽量モデルは既定で思考量が最小なので指定しない
+  const generationConfig = {
+    ...(model === FALLBACK_MODEL ? {} : { thinkingConfig: { thinkingLevel: 'low' } }),
+    ...(options.schema ? { responseMimeType: 'application/json', responseSchema: options.schema } : {}),
+  };
   let response: Response;
   try {
     response = await fetch(`${ENDPOINT}/${model}:generateContent`, {
@@ -71,15 +78,14 @@ async function requestModel(model: string, apiKey: string, options: GenerateOpti
       body: JSON.stringify({
         ...(options.system ? { systemInstruction: { parts: [{ text: options.system }] } } : {}),
         contents: options.contents,
-        ...(options.schema
-          ? { generationConfig: { responseMimeType: 'application/json', responseSchema: options.schema } }
-          : {}),
+        ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
       }),
       signal: controller.signal,
     });
   } catch (error) {
     if ((error as Error).name === 'AbortError') throw new GeminiError('timeout');
-    throw new GeminiError('network', describeError(error));
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    throw new GeminiError('network', `${describeError(error)}、${model}、${seconds}秒`);
   } finally {
     clearTimeout(timer);
   }
@@ -103,7 +109,7 @@ async function requestModel(model: string, apiKey: string, options: GenerateOpti
   return text;
 }
 
-/** 上限やサーバーエラーのときは軽量モデルでもう一度試す */
+/** キー以外の失敗では軽量モデルでもう一度試す */
 export async function generate(options: GenerateOptions): Promise<string> {
   const { model } = getSettings();
   const apiKey = usableKey();
@@ -111,7 +117,7 @@ export async function generate(options: GenerateOptions): Promise<string> {
     return await requestModel(model, apiKey, options);
   } catch (error) {
     const retryable =
-      error instanceof GeminiError && (error.kind === 'quota' || error.kind === 'server' || error.kind === 'timeout');
+      error instanceof GeminiError && ['quota', 'server', 'timeout', 'network'].includes(error.kind);
     if (!retryable || model === FALLBACK_MODEL) throw error;
     return requestModel(FALLBACK_MODEL, apiKey, options);
   }

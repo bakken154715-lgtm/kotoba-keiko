@@ -139,7 +139,7 @@ describe('generate', () => {
     expect((fetchMock.mock.calls[0][1].headers as Record<string, string>)['x-goog-api-key']).toBe('test-key');
   });
 
-  it('reports the raw cause of a network failure and does not retry it', async () => {
+  it('retries a network failure on the lighter model, then reports the raw cause', async () => {
     const fetchMock = vi.fn(async () => {
       throw new TypeError('Load failed');
     });
@@ -148,7 +148,27 @@ describe('generate', () => {
       kind: 'network',
       message: expect.stringContaining('TypeError: Load failed'),
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const recovers = vi.fn(async (url: string, _init: RequestInit) => {
+      if (url.includes('3.8')) throw new TypeError('Load failed');
+      return ok('軽量の答え');
+    });
+    vi.stubGlobal('fetch', recovers);
+    expect(await generate({ contents: [userText('質問')] })).toBe('軽量の答え');
+  });
+
+  it('lowers thinking on the main model only and keeps the JSON schema', async () => {
+    const fetchMock = vi.fn(async (url: string, _init: RequestInit) =>
+      url.includes('3.8') ? new Response('{}', { status: 500 }) : ok('{}'),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await generate({ contents: [userText('質問')], schema: { type: 'OBJECT' } });
+    const body = (i: number) => JSON.parse(fetchMock.mock.calls[i][1].body as string).generationConfig;
+    expect(body(0).thinkingConfig).toEqual({ thinkingLevel: 'low' });
+    expect(body(0).responseMimeType).toBe('application/json');
+    expect(body(1).thinkingConfig).toBeUndefined();
+    expect(body(1).responseSchema).toEqual({ type: 'OBJECT' });
   });
 
   it('retries a timeout on the lighter model', async () => {

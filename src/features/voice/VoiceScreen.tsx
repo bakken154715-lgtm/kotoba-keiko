@@ -3,26 +3,22 @@ import type { Prompt } from '../../data/prompts';
 import { reviewAnswer, transcribeOrSample } from '../../lib/coach';
 import { clearDraft, loadDraft, saveDraft, saveEntry } from '../../lib/db';
 import { transcribeAudio } from '../../lib/gemini';
+import { canRecord, startRecording, type Recording } from '../../lib/recorder';
 import { ErrorNote, SessionScreen, errorMessage, goTo } from '../../ui';
 import { MIN_ANSWER_LENGTH } from '../write/WriteScreen';
 
 const MAX_SECONDS = 180;
 type Phase = 'idle' | 'recording' | 'transcribing' | 'editing' | 'reviewing';
 
-function pickMimeType(): string | undefined {
-  return ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find((type) => MediaRecorder.isTypeSupported(type));
-}
-
 export function VoiceScreen({ prompt }: { prompt: Prompt }) {
   const draftKey = `voice-${prompt.id}`;
-  const canRecord = typeof MediaRecorder !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
-  const [phase, setPhase] = useState<Phase>(canRecord ? 'idle' : 'editing');
+  const recordable = canRecord();
+  const [phase, setPhase] = useState<Phase>(recordable ? 'idle' : 'editing');
   const [text, setText] = useState('');
   const [seconds, setSeconds] = useState(0);
   const [error, setError] = useState('');
   const [lastAudio, setLastAudio] = useState<Blob | null>(null);
-  const recorder = useRef<MediaRecorder | null>(null);
-  const stream = useRef<MediaStream | null>(null);
+  const recording = useRef<Recording | null>(null);
   const timer = useRef<number>();
 
   useEffect(() => {
@@ -34,7 +30,7 @@ export function VoiceScreen({ prompt }: { prompt: Prompt }) {
     });
     return () => {
       clearInterval(timer.current);
-      stream.current?.getTracks().forEach((track) => track.stop());
+      recording.current?.cancel();
     };
   }, [draftKey]);
 
@@ -57,31 +53,21 @@ export function VoiceScreen({ prompt }: { prompt: Prompt }) {
   async function start() {
     setError('');
     try {
-      stream.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recording.current = await startRecording((blob) => {
+        clearInterval(timer.current);
+        void transcribe(blob);
+      });
     } catch {
       setError('マイクを使えませんでした。iPhoneの設定でマイクを許可するか、キーボードの音声入力で答えてください。');
       return;
     }
-    const chunks: Blob[] = [];
-    const mimeType = pickMimeType();
-    const rec = new MediaRecorder(stream.current, mimeType ? { mimeType } : undefined);
-    rec.ondataavailable = (event) => {
-      if (event.data.size > 0) chunks.push(event.data);
-    };
-    rec.onstop = () => {
-      clearInterval(timer.current);
-      stream.current?.getTracks().forEach((track) => track.stop());
-      void transcribe(new Blob(chunks, { type: rec.mimeType || mimeType || 'audio/mp4' }));
-    };
-    recorder.current = rec;
-    rec.start();
     setSeconds(0);
     setPhase('recording');
     const startedAt = Date.now();
     timer.current = window.setInterval(() => {
       const elapsed = Math.floor((Date.now() - startedAt) / 1000);
       setSeconds(elapsed);
-      if (elapsed >= MAX_SECONDS && rec.state === 'recording') rec.stop();
+      if (elapsed >= MAX_SECONDS) recording.current?.stop();
     }, 250);
   }
 
@@ -118,7 +104,7 @@ export function VoiceScreen({ prompt }: { prompt: Prompt }) {
             </button>
           )}
           {phase === 'recording' && (
-            <button className="record-button recording" onClick={() => recorder.current?.stop()}>
+            <button className="record-button recording" onClick={() => recording.current?.stop()}>
               録音を止める
             </button>
           )}
@@ -151,7 +137,7 @@ export function VoiceScreen({ prompt }: { prompt: Prompt }) {
 
       {(phase === 'editing' || phase === 'reviewing') && (
         <>
-          {!canRecord && <p className="note">この環境では録音できません。キーボードのマイクで入力してください。</p>}
+          {!recordable && <p className="note">この環境では録音できません。キーボードのマイクで入力してください。</p>}
           <textarea
             className="answer"
             aria-label="話した内容"
@@ -170,7 +156,7 @@ export function VoiceScreen({ prompt }: { prompt: Prompt }) {
           >
             {phase === 'reviewing' ? '採点しています' : '採点する'}
           </button>
-          {canRecord && phase === 'editing' && (
+          {recordable && phase === 'editing' && (
             <button
               className="text-button"
               onClick={() => {

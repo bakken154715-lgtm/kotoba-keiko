@@ -112,7 +112,7 @@ export function SettingsScreen() {
         {testError && <ErrorNote message={testError} />}
         <label className="field">
           使うモデル
-          <select value={settings.model} onChange={(event) => change({ model: event.target.value })}>
+          <select value={settings.model} onChange={(event) => change({ model: event.target.value, modelChosen: true })}>
             {MODELS.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.label}

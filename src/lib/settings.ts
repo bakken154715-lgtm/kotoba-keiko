@@ -1,17 +1,27 @@
+export const LITE_MODEL = 'gemini-3.5-flash-lite';
+export const FULL_MODEL = 'gemini-3.8-flash';
 export const MODELS = [
-  { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash(高性能)' },
-  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite(高速)' },
+  { id: LITE_MODEL, label: 'Gemini 3.5 Flash-Lite(速い)' },
+  { id: FULL_MODEL, label: 'Gemini 3.8 Flash(高性能、時間がかかる)' },
 ];
-export const FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 
 export interface Settings {
   apiKey: string;
   model: string;
+  /** 利用者が自分でモデルを選んだら true。既定のモデルを変えても選択を上書きしない */
+  modelChosen?: boolean;
   sampleMode: boolean;
 }
 
 const KEY = 'kotoba-keiko-settings';
-const DEFAULTS: Settings = { apiKey: '', model: MODELS[0].id, sampleMode: false };
+const DEFAULTS: Settings = { apiKey: '', model: LITE_MODEL, sampleMode: false };
+
+export function parseStoredSettings(raw: string): Settings {
+  const stored: Partial<Settings> = JSON.parse(raw);
+  // 以前の版は選んでいなくても既定のモデルを保存していた
+  if (!stored.modelChosen) delete stored.model;
+  return { ...DEFAULTS, ...stored };
+}
 
 /** コピー時に混ざりやすい空白や見えない文字を取り除く */
 export function cleanApiKey(value: string): string {
@@ -29,7 +39,7 @@ let memory: Settings | null = null;
 export function getSettings(): Settings {
   if (memory) return memory;
   try {
-    memory = { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) ?? '{}') };
+    memory = parseStoredSettings(localStorage.getItem(KEY) ?? '{}');
   } catch {
     memory = { ...DEFAULTS };
   }

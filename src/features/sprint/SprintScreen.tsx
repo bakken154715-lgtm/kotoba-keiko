@@ -1,12 +1,13 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { SPRINT_PROMPTS } from '../../data/prompts';
-import { commentOnSprint } from '../../lib/coach';
+import { commentOnSprint, sprintItemsFromAudio } from '../../lib/coach';
 import { db, saveEntry } from '../../lib/db';
+import { canRecord, startRecording, type Recording } from '../../lib/recorder';
 import { ErrorNote, SessionScreen, errorMessage } from '../../ui';
 
 const DURATIONS = [30, 60, 90];
-type Phase = 'setup' | 'running' | 'done';
+type Phase = 'setup' | 'running' | 'transcribing' | 'done';
 
 function pick(except?: string): string {
   const pool = SPRINT_PROMPTS.filter((text) => text !== except);
@@ -17,6 +18,8 @@ export function SprintScreen() {
   const [phase, setPhase] = useState<Phase>('setup');
   const [prompt, setPrompt] = useState(() => pick());
   const [duration, setDuration] = useState(60);
+  const [voice, setVoice] = useState(false);
+  const [lastAudio, setLastAudio] = useState<Blob | null>(null);
   const [remaining, setRemaining] = useState(0);
   const [items, setItems] = useState<string[]>([]);
   const [input, setInput] = useState('');
@@ -27,13 +30,16 @@ export function SprintScreen() {
   const latest = useRef({ items, input });
   latest.current = { items, input };
   const inputRef = useRef<HTMLInputElement>(null);
+  const recording = useRef<Recording | null>(null);
 
   const best = useLiveQuery(async () => {
     const entries = await db.entries.where('mode').equals('sprint').toArray();
     return entries
-      .filter((entry) => entry.sprintSeconds === duration && entry.id !== entryId)
+      .filter((entry) => entry.sprintSeconds === duration && !!entry.sprintVoice === voice && entry.id !== entryId)
       .reduce((max, entry) => Math.max(max, entry.sprintItems?.length ?? 0), 0);
-  }, [duration, entryId]);
+  }, [duration, voice, entryId]);
+
+  useEffect(() => () => recording.current?.cancel(), []);
 
   useEffect(() => {
     if (phase !== 'running') return;
@@ -52,11 +58,44 @@ export function SprintScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, duration]);
 
+  async function begin() {
+    setError('');
+    if (voice) {
+      try {
+        recording.current = await startRecording((blob) => void transcribe(blob));
+      } catch {
+        setError('マイクを使えませんでした。iPhoneの設定でマイクを許可するか、打って答えてください。');
+        return;
+      }
+    }
+    setPhase('running');
+  }
+
   async function finish() {
+    if (voice) {
+      setPhase('transcribing');
+      recording.current?.stop();
+      return;
+    }
     const pending = latest.current.input.trim();
     const all = pending && !latest.current.items.includes(pending) ? [...latest.current.items, pending] : latest.current.items;
-    setItems(all);
     setInput('');
+    await complete(all);
+  }
+
+  async function transcribe(audio: Blob) {
+    setError('');
+    setLastAudio(null);
+    try {
+      await complete(await sprintItemsFromAudio(prompt, audio));
+    } catch (err) {
+      setLastAudio(audio);
+      setError(errorMessage(err));
+    }
+  }
+
+  async function complete(all: string[]) {
+    setItems(all);
     setPhase('done');
     if (all.length > 0) {
       const id = await saveEntry({
@@ -66,6 +105,7 @@ export function SprintScreen() {
         text: all.join('\n'),
         sprintSeconds: duration,
         sprintItems: all,
+        ...(voice ? { sprintVoice: true } : {}),
       });
       setEntryId(id);
     }
@@ -105,6 +145,7 @@ export function SprintScreen() {
     setEntryId(undefined);
     setComment('');
     setError('');
+    setLastAudio(null);
     setPhase('setup');
   }
 
@@ -121,7 +162,23 @@ export function SprintScreen() {
               </button>
             ))}
           </div>
-          <button className="button primary wide" onClick={() => setPhase('running')}>
+          {canRecord() && (
+            <div className="chips" role="group" aria-label="答え方">
+              <button className="chip" aria-pressed={!voice} onClick={() => setVoice(false)}>
+                打って答える
+              </button>
+              <button className="chip" aria-pressed={voice} onClick={() => setVoice(true)}>
+                話して答える
+              </button>
+            </div>
+          )}
+          {voice && (
+            <p className="note">
+              時間いっぱい話してください。終わると言葉ごとに分けて数えます。録音はAIで文字にするためGoogleへ送られ、端末には残しません。
+            </p>
+          )}
+          {error && <ErrorNote message={error} />}
+          <button className="button primary wide" onClick={begin}>
             始める
           </button>
           <button className="text-button" onClick={() => setPrompt(pick(prompt))}>
@@ -137,30 +194,51 @@ export function SprintScreen() {
               {remaining}
               <small>秒</small>
             </span>
-            <span>{items.length}個</span>
+            {voice ? <span>録音しています</span> : <span>{items.length}個</span>}
           </div>
-          <div className="sprint-input">
-            <input
-              ref={inputRef}
-              aria-label="思いついた言葉"
-              enterKeyHint="next"
-              autoComplete="off"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={onKeyDown}
-            />
-            <button className="button" onClick={add}>
-              追加
-            </button>
-          </div>
-          <ul className="sprint-items">
-            {[...items].reverse().map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
+          {!voice && (
+            <>
+              <div className="sprint-input">
+                <input
+                  ref={inputRef}
+                  aria-label="思いついた言葉"
+                  enterKeyHint="next"
+                  autoComplete="off"
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={onKeyDown}
+                />
+                <button className="button" onClick={add}>
+                  追加
+                </button>
+              </div>
+              <ul className="sprint-items">
+                {[...items].reverse().map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </>
+          )}
           <button className="text-button" onClick={() => void finish()}>
             ここで終える
           </button>
+        </>
+      )}
+
+      {phase === 'transcribing' && (
+        <>
+          {!error && <p className="note">話した言葉を数えています</p>}
+          {error && <ErrorNote message={error} />}
+          {lastAudio && (
+            <button className="button wide" onClick={() => transcribe(lastAudio)}>
+              もう一度文字にする
+            </button>
+          )}
+          {lastAudio && (
+            <button className="text-button" onClick={restart}>
+              この録音を捨てて次のお題へ進む
+            </button>
+          )}
         </>
       )}
 

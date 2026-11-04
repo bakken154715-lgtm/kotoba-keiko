@@ -47,6 +47,8 @@ export interface Entry {
   sprintSeconds?: number;
   sprintItems?: string[];
   sprintComment?: string;
+  /** 話して答えた瞬発力なら true。打った記録とは最高記録を分ける */
+  sprintVoice?: boolean;
   turns?: Turn[];
 }
 

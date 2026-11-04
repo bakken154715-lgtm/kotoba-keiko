@@ -1,9 +1,9 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseReview } from './coach';
+import { parseReview, parseSprintItems } from './coach';
 import { db, exportBackup, importBackup, saveEntry } from './db';
 import { GeminiError, generate, geminiAudioType, testConnection, userText } from './gemini';
-import { updateSettings } from './settings';
+import { parseStoredSettings, updateSettings } from './settings';
 import { dayIndex, streakDays } from './stats';
 import { totalScore } from './types';
 
@@ -33,6 +33,29 @@ describe('parseReview', () => {
     expect(() => parseReview('not json')).toThrow();
     expect(() => parseReview('{}')).toThrow();
     expect(() => parseReview(JSON.stringify({ ...validReview, scores: { logic: 'x' } }))).toThrow();
+  });
+});
+
+describe('parseSprintItems', () => {
+  it('trims, drops blanks and removes duplicates', () => {
+    expect(parseSprintItems(JSON.stringify({ items: [' 海 ', '山', '海', '', 3] }))).toEqual(['海', '山']);
+    expect(parseSprintItems('{"items":[]}')).toEqual([]);
+  });
+
+  it('rejects broken JSON', () => {
+    expect(() => parseSprintItems('not json')).toThrow();
+  });
+});
+
+describe('parseStoredSettings', () => {
+  it('moves a model the user never chose to the new default, keeping the key', () => {
+    const settings = parseStoredSettings('{"apiKey":"k","model":"gemini-3.8-flash"}');
+    expect(settings.model).toBe('gemini-3.5-flash-lite');
+    expect(settings.apiKey).toBe('k');
+  });
+
+  it('keeps a model the user chose', () => {
+    expect(parseStoredSettings('{"model":"gemini-3.8-flash","modelChosen":true}').model).toBe('gemini-3.8-flash');
   });
 });
 
@@ -111,6 +134,15 @@ describe('generate', () => {
     vi.stubGlobal('fetch', fetchMock);
     expect(await generate({ contents: [userText('質問')] })).toBe('軽量の答え');
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back from the lighter model to the main one on 429', async () => {
+    updateSettings({ model: 'gemini-3.5-flash-lite' });
+    const fetchMock = vi.fn(async (url: string, _init: RequestInit) =>
+      url.includes('lite') ? new Response('{}', { status: 429 }) : ok('本来の答え'),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await generate({ contents: [userText('質問')] })).toBe('本来の答え');
   });
 
   it('reports quota when both models are limited, and does not retry a bad key', async () => {

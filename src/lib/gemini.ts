@@ -1,7 +1,7 @@
-import { FALLBACK_MODEL, cleanApiKey, getSettings, isApiKeyFormatValid } from './settings';
+import { FULL_MODEL, LITE_MODEL, cleanApiKey, getSettings, isApiKeyFormatValid } from './settings';
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
-// iPhoneのSafariは約60秒で通信を打ち切ることがあるので、その前に自分で区切って軽量モデルへ回す
+// iPhoneのSafariは約60秒で通信を打ち切ることがあるので、その前に自分で区切ってもう一方のモデルへ回す
 const TIMEOUT_MS = 50_000;
 
 export type GeminiErrorKind =
@@ -67,7 +67,7 @@ async function requestModel(model: string, apiKey: string, options: GenerateOpti
   const startedAt = Date.now();
   // 軽量モデルは既定で思考量が最小なので指定しない
   const generationConfig = {
-    ...(model === FALLBACK_MODEL ? {} : { thinkingConfig: { thinkingLevel: 'low' } }),
+    ...(model === LITE_MODEL ? {} : { thinkingConfig: { thinkingLevel: 'low' } }),
     ...(options.schema ? { responseMimeType: 'application/json', responseSchema: options.schema } : {}),
   };
   let response: Response;
@@ -109,7 +109,7 @@ async function requestModel(model: string, apiKey: string, options: GenerateOpti
   return text;
 }
 
-/** キー以外の失敗では軽量モデルでもう一度試す */
+/** キー以外の失敗ではもう一方のモデルで試す。無料枠の上限はモデルごとに別 */
 export async function generate(options: GenerateOptions): Promise<string> {
   const { model } = getSettings();
   const apiKey = usableKey();
@@ -118,8 +118,8 @@ export async function generate(options: GenerateOptions): Promise<string> {
   } catch (error) {
     const retryable =
       error instanceof GeminiError && ['quota', 'server', 'timeout', 'network'].includes(error.kind);
-    if (!retryable || model === FALLBACK_MODEL) throw error;
-    return requestModel(FALLBACK_MODEL, apiKey, options);
+    if (!retryable) throw error;
+    return requestModel(model === LITE_MODEL ? FULL_MODEL : LITE_MODEL, apiKey, options);
   }
 }
 
@@ -154,8 +154,11 @@ export function geminiAudioType(recordedType: string): string {
   return base === 'audio/mp4' || base === 'audio/x-m4a' ? 'audio/m4a' : base;
 }
 
+export async function audioPart(blob: Blob): Promise<Part> {
+  return { inlineData: { mimeType: geminiAudioType(blob.type), data: await blobToBase64(blob) } };
+}
+
 export async function transcribeAudio(blob: Blob): Promise<string> {
-  const data = await blobToBase64(blob);
   const text = await generate({
     contents: [
       {
@@ -164,7 +167,7 @@ export async function transcribeAudio(blob: Blob): Promise<string> {
           {
             text: '次の日本語の音声を、話したとおりに文字起こししてください。「えー」「あの」などの言いよどみも残してください。文字起こしの本文だけを返してください。',
           },
-          { inlineData: { mimeType: geminiAudioType(blob.type), data } },
+          await audioPart(blob),
         ],
       },
     ],
